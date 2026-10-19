@@ -2,6 +2,7 @@ package com.forja.chat;
 
 import android.content.Context;
 import android.graphics.PorterDuff;
+import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
 import android.view.View;
@@ -27,6 +28,7 @@ final class Ui {
     static final int SEL = 0xFF6B66F5;
     static final int LINE = 0x297C86FF;
     static final int ONLINE = 0xFF2ED48A;
+    static final int DANGER = 0xFFFF6B7A;
     static final int OFF = 0xFF5E6488;
 
     static int dp(Context c, int v) {
@@ -48,11 +50,25 @@ final class Ui {
         return g;
     }
 
+    static GradientDrawable ring(Context c, int stroke, int strokeDp) {
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(0);
+        g.setStroke(dp(c, strokeDp), stroke);
+        return g;
+    }
+
     static GradientDrawable sendGradient() {
         GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
                 new int[]{0xFF9A7BFF, 0xFF6A4DF4});
         g.setShape(GradientDrawable.OVAL);
         return g;
+    }
+
+    static LinearLayout.LayoutParams lp(int w, int h, float weight, int l, int t, int r, int b) {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(w, h, weight);
+        p.setMargins(l, t, r, b);
+        return p;
     }
 
     static TextView text(Context c, String s, float sp, int color) {
@@ -64,7 +80,7 @@ final class Ui {
     }
 
     static TextView bold(TextView t) {
-        t.setTypeface(t.getTypeface(), android.graphics.Typeface.BOLD);
+        t.setTypeface(t.getTypeface(), Typeface.BOLD);
         return t;
     }
 
@@ -86,10 +102,28 @@ final class Ui {
         iv.setImageResource(res);
         iv.setColorFilter(tint, PorterDuff.Mode.SRC_IN);
         f.addView(iv, new FrameLayout.LayoutParams(dp(c, 20), dp(c, 20), Gravity.CENTER));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(c, 40), dp(c, 40));
-        lp.setMargins(dp(c, 4), 0, 0, 0);
-        f.setLayoutParams(lp);
+        f.setLayoutParams(lp(dp(c, 40), dp(c, 40), 0f, dp(c, 4), 0, 0, 0));
         return f;
+    }
+
+    static TextView chip(Context c, String s, View.OnClickListener l) {
+        TextView t = text(c, s, 13, TEXT);
+        t.setSingleLine();
+        t.setPadding(dp(c, 14), dp(c, 9), dp(c, 14), dp(c, 9));
+        t.setBackground(shape(c, CARD, LINE, 1, 20));
+        t.setClickable(true);
+        t.setOnClickListener(l);
+        return t;
+    }
+
+    static TextView pill(Context c, String s, boolean primary, View.OnClickListener l) {
+        TextView t = bold(text(c, s, 13, primary ? 0xFFFFFFFF : TEXT));
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(dp(c, 16), dp(c, 9), dp(c, 16), dp(c, 9));
+        t.setBackground(primary ? shape(c, ACCENT, 0, 0, 12) : shape(c, CARD2, LINE, 1, 12));
+        t.setClickable(true);
+        t.setOnClickListener(l);
+        return t;
     }
 
     /** Logo del asistente sobre un círculo con el color de su marca. */

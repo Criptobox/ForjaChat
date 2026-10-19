@@ -3,7 +3,7 @@ package com.forja.chat;
 import java.util.List;
 import java.util.Locale;
 
-/** Coordinador por reglas simples: decide la ruta (A web, C asistencia) y qué IA sugerir. */
+/** Coordinador por reglas: decide la ruta (A web, C asistencia) y qué IA conviene. */
 final class Coordinator {
 
     static final class Decision {
@@ -18,16 +18,27 @@ final class Coordinator {
         }
     }
 
-    private static final String[] CODE = {"código", "codigo", "code", "función", "funcion", "bug", "error",
-            "python", "java", "script", "sql", "html", "css", "api", "compilar"};
-    private static final String[] SEARCH = {"busca", "noticias", "hoy", "precio", "última", "ultima",
-            "actual", "clima", "resultado"};
+    /** {palabras clave, asistentes por orden de preferencia, motivo} */
+    private static final String[][] RULES = {
+            {"código|codigo|code|función|funcion|bug|error|python|java|script|sql|html|css|api|compilar|regex",
+                    "claude|deepseek|chatgpt", "parece código"},
+            {"calcula|matemática|matematica|ecuación|ecuacion|demuestra|lógica|logica|razona",
+                    "deepseek|chatgpt|claude", "requiere razonamiento"},
+            {"busca|noticias|hoy|precio|última|ultima|actual|clima|resultado|quién ganó",
+                    "gemini|chatgpt", "necesita datos actuales"},
+            {"imagen|foto|dibuja|logo|ilustración|ilustracion",
+                    "gemini|chatgpt", "tema visual"},
+            {"traduce|traducción|traduccion|translate",
+                    "chatgpt|gemini|claude", "traducción"},
+            {"redacta|corrige|ortografía|ortografia|correo|carta|resume|resumen|ensayo",
+                    "claude|chatgpt|gemini", "escritura"},
+    };
 
     static Decision decide(String text, String pref, boolean online, boolean inject,
                            List<Assistant> all, String currentId) {
         if (!online) {
             return new Decision('X', null,
-                    "Sin conexión. La IA local (ruta B) llegará en una próxima versión.");
+                    "Sin conexión. La IA local (ruta Local) llegará en una próxima versión.");
         }
 
         char route;
@@ -53,16 +64,19 @@ final class Coordinator {
         String lower = text.toLowerCase(Locale.ROOT);
 
         if ("AUTO".equals(pref) || current == null) {
-            if (hasAny(lower, CODE)) {
-                target = firstOf(all, "claude", "deepseek", "chatgpt");
-                why += "parece código";
-            } else if (hasAny(lower, SEARCH)) {
-                target = firstOf(all, "gemini", "chatgpt");
-                why += "parece búsqueda actual";
+            for (String[] rule : RULES) {
+                if (!hasAny(lower, rule[0].split("\\|"))) continue;
+                Assistant t = firstOf(all, rule[1].split("\\|"));
+                if (t != null) {
+                    target = t;
+                    why += rule[2];
+                    break;
+                }
             }
         }
         if (target == null) {
             target = current != null ? current : firstOf(all, "chatgpt", "claude", "gemini");
+            if (target == null) target = all.get(0);
             if (why.isEmpty()) why = current != null ? "asistente actual" : "por defecto";
         }
         return new Decision(route, target, why);
@@ -84,6 +98,6 @@ final class Coordinator {
             Assistant a = byId(all, id);
             if (a != null) return a;
         }
-        return all.get(0);
+        return null;
     }
 }

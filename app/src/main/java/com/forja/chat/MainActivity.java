@@ -8,16 +8,17 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Bundle;
-import android.text.Editable;
+import android.speech.RecognizerIntent;
 import android.text.InputType;
 import android.text.SpannableString;
-import android.text.TextWatcher;
+import android.text.TextUtils;
 import android.text.style.ForegroundColorSpan;
 import android.view.Gravity;
 import android.view.View;
@@ -29,14 +30,13 @@ import android.webkit.WebStorage;
 import android.webkit.WebView;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
-
-import org.json.JSONArray;
-import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.InputStream;
@@ -49,19 +49,24 @@ import java.util.Set;
 
 public class MainActivity extends Activity implements WebViewPool.Host {
 
-    private static final int RQ_EXPORT = 1, RQ_IMPORT = 2, RQ_FILE = 3, RQ_PERM = 4;
+    static final int T_HOME = 0, T_CHAT = 1, T_PROMPTS = 2, T_HIST = 3, T_SET = 4;
+    private static final int RQ_EXPORT = 1, RQ_IMPORT = 2, RQ_FILE = 3, RQ_PERM = 4, RQ_VOICE = 5;
     private static final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT;
     private static final int WRAP = ViewGroup.LayoutParams.WRAP_CONTENT;
     private static final String[] ROUTES = {"AUTO", "A", "B", "C"};
     private static final String[] ROUTE_LABELS = {"Auto", "Web", "Local", "Asistencia"};
     private static final int[] ROUTE_ICONS = {R.drawable.ic_auto, R.drawable.ic_globe,
             R.drawable.ic_cpu, R.drawable.ic_handoff};
+    private static final String[] TAB_LABELS = {"Inicio", "Chat", "Prompts", "Historial", "Ajustes"};
+    private static final int[] TAB_ICONS = {R.drawable.ic_home, R.drawable.ic_chat,
+            R.drawable.ic_prompts, R.drawable.ic_history, R.drawable.ic_settings};
 
-    private Prefs prefs;
-    private WebViewPool pool;
-    private boolean tablet;
+    Prefs prefs;
+    WebViewPool pool;
+    boolean tablet;
 
-    private LinearLayout sidebar, sideList, navRow;
+    private Screens screens;
+    private LinearLayout sideList, navRow, dock;
     private FrameLayout headerBox, content;
     private View statusDot;
     private TextView statusText;
@@ -70,13 +75,15 @@ public class MainActivity extends Activity implements WebViewPool.Host {
     private final ImageView[] segIcon = new ImageView[4];
     private final TextView[] segLabel = new TextView[4];
 
-    private String current;   // null = inicio
+    private int tab = T_HOME;
+    private String current;
     private String second;
     private boolean split;
     private ValueCallback<Uri[]> fileCb;
     private String statusMsg = "Tu espacio para todas las IA";
+    private ConnectivityManager.NetworkCallback netCb;
 
-    private int d(int v) {
+    int d(int v) {
         return Ui.dp(this, v);
     }
 
@@ -87,13 +94,59 @@ public class MainActivity extends Activity implements WebViewPool.Host {
         super.onCreate(b);
         prefs = new Prefs(this);
         pool = new WebViewPool(this, this);
+        screens = new Screens(this);
+        if (prefs.openLast() && prefs.find(prefs.last()) != null) {
+            current = prefs.last();
+            tab = T_CHAT;
+        }
         buildUi();
+        handleIntent(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleIntent(intent);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        netCb = new ConnectivityManager.NetworkCallback() {
+            @Override
+            public void onAvailable(Network n) {
+                runOnUiThread(() -> refreshChrome());
+            }
+
+            @Override
+            public void onLost(Network n) {
+                runOnUiThread(() -> refreshChrome());
+            }
+        };
+        try {
+            cm.registerDefaultNetworkCallback(netCb);
+        } catch (Exception ignored) {
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        try {
+            ((ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE))
+                    .unregisterNetworkCallback(netCb);
+        } catch (Exception ignored) {
+        }
+        super.onPause();
     }
 
     @Override
     public void onConfigurationChanged(Configuration c) {
         super.onConfigurationChanged(c);
+        String keep = input != null ? input.getText().toString() : "";
         buildUi();
+        input.setText(keep);
     }
 
     @Override
@@ -104,12 +157,32 @@ public class MainActivity extends Activity implements WebViewPool.Host {
 
     @Override
     public void onBackPressed() {
-        if (current != null) {
+        if (tab == T_CHAT && current != null) {
             WebView w = pool.peek(current);
-            if (w != null && w.canGoBack()) w.goBack();
-            else showHome();
-        } else {
-            super.onBackPressed();
+            if (w != null && w.canGoBack()) {
+                w.goBack();
+                return;
+            }
+        }
+        if (tab != T_HOME) setTab(T_HOME);
+        else super.onBackPressed();
+    }
+
+    private void handleIntent(Intent i) {
+        if (i == null) return;
+        String shared = null;
+        if (Intent.ACTION_SEND.equals(i.getAction())) {
+            shared = i.getStringExtra(Intent.EXTRA_TEXT);
+        } else if (Intent.ACTION_PROCESS_TEXT.equals(i.getAction())) {
+            CharSequence cs = i.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT);
+            if (cs != null) shared = cs.toString();
+        }
+        if (shared != null && !shared.trim().isEmpty()) {
+            input.setText(shared);
+            input.setSelection(input.length());
+            tab = current != null ? T_CHAT : T_HOME;
+            refresh();
+            setStatus("Texto recibido. Elige una ruta y pulsa enviar.");
         }
     }
 
@@ -125,22 +198,18 @@ public class MainActivity extends Activity implements WebViewPool.Host {
         body.setOrientation(LinearLayout.HORIZONTAL);
         root.addView(body, new LinearLayout.LayoutParams(MATCH, 0, 1f));
 
-        sidebar = null;
         sideList = null;
-        navRow = null;
         if (tablet) {
-            sidebar = new LinearLayout(this);
+            LinearLayout sidebar = new LinearLayout(this);
             sidebar.setOrientation(LinearLayout.VERTICAL);
             sidebar.setPadding(d(14), d(18), d(10), d(14));
             sidebar.addView(brand(44));
             ScrollView sv = new ScrollView(this);
             sideList = new LinearLayout(this);
             sideList.setOrientation(LinearLayout.VERTICAL);
-            sv.addView(sideList);
-            LinearLayout.LayoutParams svp = new LinearLayout.LayoutParams(MATCH, 0, 1f);
-            svp.setMargins(0, d(16), 0, d(8));
-            sidebar.addView(sv, svp);
-            sidebar.addView(wideButton("Agregar modelo", R.drawable.ic_plus, v -> editDialog(null)));
+            sv.addView(sideList, new ViewGroup.LayoutParams(MATCH, WRAP));
+            sidebar.addView(sv, Ui.lp(MATCH, 0, 1f, 0, d(16), 0, d(8)));
+            sidebar.addView(Ui.pill(this, "+  Agregar modelo", false, v -> editModel(null)));
             body.addView(sidebar, new LinearLayout.LayoutParams(d(300), MATCH));
             View line = new View(this);
             line.setBackgroundColor(Ui.LINE);
@@ -154,36 +223,50 @@ public class MainActivity extends Activity implements WebViewPool.Host {
         main.addView(headerBox, new LinearLayout.LayoutParams(MATCH, WRAP));
         content = new FrameLayout(this);
         main.addView(content, new LinearLayout.LayoutParams(MATCH, 0, 1f));
-        main.addView(buildDock());
+        dock = buildDock();
+        main.addView(dock, new LinearLayout.LayoutParams(MATCH, WRAP));
 
-        if (tablet) {
-            navRow = new LinearLayout(this);
-            navRow.setOrientation(LinearLayout.HORIZONTAL);
-            navRow.setBackgroundColor(Ui.DOCK);
-            root.addView(navRow, new LinearLayout.LayoutParams(MATCH, d(66)));
-        }
+        navRow = new LinearLayout(this);
+        navRow.setOrientation(LinearLayout.HORIZONTAL);
+        navRow.setBackgroundColor(Ui.DOCK);
+        root.addView(navRow, new LinearLayout.LayoutParams(MATCH, d(64)));
+
         setContentView(root);
         refresh();
     }
 
-    private void refresh() {
+    void refresh() {
         pool.detachAll();
         headerBox.removeAllViews();
         content.removeAllViews();
-        if (current == null) {
-            headerBox.addView(homeHeader());
-            content.addView(tablet ? welcome() : phoneHome());
-        } else {
-            headerBox.addView(chatHeader());
-            content.addView(chatBody());
-        }
-        if (tablet) {
-            refreshSidebar();
-            refreshNav();
-        }
+        if (tab == T_CHAT && current == null) current = defaultAssistantId();
+        headerBox.addView(buildHeader());
+        content.addView(buildBody());
+        dock.setVisibility(tab == T_HOME || tab == T_CHAT ? View.VISIBLE : View.GONE);
+        if (tablet) refreshSidebar();
+        refreshNav();
         styleSegs();
         statusText.setText(statusMsg);
         statusDot.setBackground(Ui.circle(isOnline() ? Ui.ONLINE : Ui.OFF));
+    }
+
+    private void refreshChrome() {
+        if (statusDot == null) return;
+        statusDot.setBackground(Ui.circle(isOnline() ? Ui.ONLINE : Ui.OFF));
+        if (tab == T_CHAT && current != null) {
+            headerBox.removeAllViews();
+            headerBox.addView(chatHeader());
+        }
+    }
+
+    private String defaultAssistantId() {
+        String id = prefs.last();
+        return prefs.find(id) != null ? id : Prefs.BUILTIN[0].id;
+    }
+
+    private void setTab(int t) {
+        tab = t;
+        refresh();
     }
 
     // ------------------------------------------------------------ cabeceras
@@ -210,18 +293,43 @@ public class MainActivity extends Activity implements WebViewPool.Host {
         return r;
     }
 
-    private View homeHeader() {
+    private View buildHeader() {
+        View h;
+        switch (tab) {
+            case T_CHAT:
+                h = chatHeader();
+                break;
+            case T_PROMPTS:
+                h = titleHeader("Prompts", "Tu biblioteca de plantillas");
+                break;
+            case T_HIST:
+                h = titleHeader("Historial", "Preguntas que has enviado");
+                break;
+            case T_SET:
+                h = titleHeader("Ajustes", "Rutas, datos y privacidad");
+                break;
+            default:
+                h = tablet ? titleHeader("Inicio", "Elige un asistente para empezar") : brandHeader();
+        }
+        return h;
+    }
+
+    private View brandHeader() {
         LinearLayout h = new LinearLayout(this);
         h.setOrientation(LinearLayout.HORIZONTAL);
         h.setGravity(Gravity.CENTER_VERTICAL);
-        h.setPadding(d(16), d(14), d(12), d(8));
-        if (tablet) {
-            h.addView(Ui.bold(Ui.text(this, "Bienvenido", 20, Ui.TEXT)),
-                    new LinearLayout.LayoutParams(0, WRAP, 1f));
-        } else {
-            h.addView(brand(40), new LinearLayout.LayoutParams(0, WRAP, 1f));
-        }
-        h.addView(Ui.iconBtn(this, R.drawable.ic_dots, "Menú", Ui.TEXT, v -> showMenu()));
+        h.setPadding(d(16), d(14), d(16), d(8));
+        h.addView(brand(40), new LinearLayout.LayoutParams(0, WRAP, 1f));
+        h.setLayoutParams(new FrameLayout.LayoutParams(MATCH, WRAP));
+        return h;
+    }
+
+    private View titleHeader(String title, String sub) {
+        LinearLayout h = new LinearLayout(this);
+        h.setOrientation(LinearLayout.VERTICAL);
+        h.setPadding(d(18), d(16), d(16), d(6));
+        h.addView(Ui.bold(Ui.text(this, title, 22, Ui.TEXT)));
+        h.addView(Ui.text(this, sub, 13, Ui.SUB));
         h.setLayoutParams(new FrameLayout.LayoutParams(MATCH, WRAP));
         return h;
     }
@@ -237,13 +345,6 @@ public class MainActivity extends Activity implements WebViewPool.Host {
         hp.setMargins(d(8), d(8), d(8), d(2));
         h.setLayoutParams(hp);
 
-        if (!tablet) {
-            ImageView back = Ui.icon(this, R.drawable.ic_back, 24, 0xFFC9CDF5);
-            back.setContentDescription("Volver");
-            back.setOnClickListener(v -> showHome());
-            back.setPadding(0, 0, d(8), 0);
-            h.addView(back);
-        }
         h.addView(Ui.logo(this, a, tablet ? 52 : 42));
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
@@ -253,193 +354,115 @@ public class MainActivity extends Activity implements WebViewPool.Host {
         col.addView(Ui.text(this, a.vendor + (on ? "  ·  En línea" : "  ·  Sin conexión"), 12,
                 on ? Ui.ONLINE : Ui.SUB));
         h.addView(col, new LinearLayout.LayoutParams(0, WRAP, 1f));
-
-        if (tablet) {
-            h.addView(Ui.iconBtn(this, R.drawable.ic_plus, "Nuevo chat", Ui.TEXT, v -> {
-                WebView w = pool.peek(current);
-                Assistant cur = prefs.find(current);
-                if (w != null && cur != null) w.loadUrl(cur.url);
-            }));
-        }
         h.addView(Ui.iconBtn(this, R.drawable.ic_split, "Vista dividida",
                 split ? Ui.ACCENT_TXT : Ui.TEXT, v -> toggleSplit()));
-        h.addView(Ui.iconBtn(this, R.drawable.ic_dots, "Menú", Ui.TEXT, v -> showMenu()));
+        h.addView(Ui.iconBtn(this, R.drawable.ic_dots, "Opciones del chat", Ui.TEXT,
+                v -> showChatMenu()));
         return h;
     }
 
     // ------------------------------------------------------------ contenido
+
+    private View buildBody() {
+        switch (tab) {
+            case T_CHAT:
+                return chatBody();
+            case T_PROMPTS:
+                return screens.prompts();
+            case T_HIST:
+                return screens.history();
+            case T_SET:
+                return screens.settings();
+            default:
+                return screens.home();
+        }
+    }
+
+    private View chatBody() {
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        if (!tablet) col.addView(switcher(), new LinearLayout.LayoutParams(MATCH, d(54)));
+        LinearLayout panes = new LinearLayout(this);
+        panes.setOrientation(LinearLayout.VERTICAL);
+        panes.setPadding(d(8), d(4), d(8), d(4));
+        panes.addView(pane(prefs.find(current)), new LinearLayout.LayoutParams(MATCH, 0, 1f));
+        Assistant b = split ? prefs.find(second) : null;
+        if (b != null) {
+            panes.addView(pane(b), Ui.lp(MATCH, 0, 1f, 0, d(8), 0, 0));
+        }
+        col.addView(panes, new LinearLayout.LayoutParams(MATCH, 0, 1f));
+        return col;
+    }
+
+    /** Franja de logos para cambiar de asistente sin volver al inicio. */
+    private View switcher() {
+        HorizontalScrollView hs = new HorizontalScrollView(this);
+        hs.setHorizontalScrollBarEnabled(false);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(d(10), d(4), d(10), d(4));
+        for (final Assistant a : prefs.all()) {
+            boolean sel = a.id.equals(current);
+            FrameLayout cell = new FrameLayout(this);
+            cell.setContentDescription(a.name);
+            cell.setClickable(true);
+            cell.setOnClickListener(v -> showAssistant(a.id));
+            if (sel) cell.setBackground(Ui.ring(this, Ui.SEL, 2));
+            View logo = Ui.logo(this, a, 38);
+            cell.addView(logo, new FrameLayout.LayoutParams(d(38), d(38), Gravity.CENTER));
+            row.addView(cell, Ui.lp(d(46), d(46), 0f, 0, 0, d(6), 0));
+        }
+        hs.addView(row);
+        return hs;
+    }
 
     private View pane(Assistant a) {
         FrameLayout f = new FrameLayout(this);
         f.setBackground(Ui.shape(this, Ui.PANEL, Ui.LINE, 1, 18));
         f.setClipToOutline(true);
         f.addView(pool.get(a), new FrameLayout.LayoutParams(MATCH, MATCH));
+
+        final ProgressBar pb = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        pb.setMax(100);
+        pb.setProgressTintList(ColorStateList.valueOf(Ui.ACCENT));
+        pb.setProgressBackgroundTintList(ColorStateList.valueOf(0x00000000));
+        f.addView(pb, new FrameLayout.LayoutParams(MATCH, d(3), Gravity.TOP));
+
+        final LinearLayout err = new LinearLayout(this);
+        err.setOrientation(LinearLayout.VERTICAL);
+        err.setGravity(Gravity.CENTER);
+        err.setBackgroundColor(Ui.PANEL);
+        err.setPadding(d(30), d(20), d(30), d(20));
+        err.setClickable(true);
+        TextView et = Ui.bold(Ui.text(this, "No se pudo cargar " + a.name, 17, Ui.TEXT));
+        et.setGravity(Gravity.CENTER);
+        err.addView(et);
+        TextView es = Ui.text(this, "Revisa tu conexión e inténtalo de nuevo.", 14, Ui.SUB);
+        es.setGravity(Gravity.CENTER);
+        es.setPadding(0, d(6), 0, d(16));
+        err.addView(es);
+        final String id = a.id;
+        err.addView(Ui.pill(this, "Reintentar", true, v -> pool.reload(id)));
+        err.setVisibility(View.GONE);
+        f.addView(err, new FrameLayout.LayoutParams(MATCH, MATCH));
+
+        pool.listen(a.id, new WebViewPool.PageListener() {
+            @Override
+            public void progress(int p) {
+                pb.setProgress(p);
+                pb.setVisibility(p >= 100 ? View.GONE : View.VISIBLE);
+            }
+
+            @Override
+            public void error(boolean failed) {
+                err.setVisibility(failed ? View.VISIBLE : View.GONE);
+            }
+        });
         return f;
     }
 
-    private View chatBody() {
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-        col.setPadding(d(8), d(6), d(8), d(4));
-        Assistant a = prefs.find(current);
-        col.addView(pane(a), new LinearLayout.LayoutParams(MATCH, 0, 1f));
-        Assistant b = split ? prefs.find(second) : null;
-        if (b != null) {
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(MATCH, 0, 1f);
-            lp.setMargins(0, d(8), 0, 0);
-            col.addView(pane(b), lp);
-        }
-        return col;
-    }
-
-    private View welcome() {
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-        col.setGravity(Gravity.CENTER);
-        col.setPadding(d(40), d(20), d(40), d(20));
-        ImageView logo = new ImageView(this);
-        logo.setImageResource(R.drawable.ic_forja);
-        col.addView(logo, new LinearLayout.LayoutParams(d(88), d(88)));
-        TextView t = Ui.bold(Ui.text(this, "Tu espacio para todas las IA", 22, Ui.TEXT));
-        t.setGravity(Gravity.CENTER);
-        t.setPadding(0, d(16), 0, d(8));
-        col.addView(t);
-        TextView s = Ui.text(this, "Elige un asistente en la barra lateral. Cada uno guarda su historial en su propia web.", 15, Ui.SUB);
-        s.setGravity(Gravity.CENTER);
-        col.addView(s);
-        TextView r = Ui.text(this, "Ruta Web: rellena el chat y tú pulsas enviar\nRuta Asistencia: copia tu pregunta para pegarla\nRuta Local: próximamente", 13, 0xFFB6BCE4);
-        r.setPadding(d(18), d(14), d(18), d(14));
-        r.setBackground(Ui.shape(this, Ui.CARD, Ui.LINE, 1, 16));
-        r.setLineSpacing(0, 1.25f);
-        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(WRAP, WRAP);
-        rp.setMargins(0, d(24), 0, 0);
-        col.addView(r, rp);
-        return col;
-    }
-
-    private View phoneHome() {
-        ScrollView sv = new ScrollView(this);
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-        col.setPadding(d(14), d(4), d(14), d(10));
-
-        final EditText search = new EditText(this);
-        search.setHint("Buscar asistente");
-        search.setHintTextColor(Ui.SUB);
-        search.setTextColor(Ui.TEXT);
-        search.setSingleLine(true);
-        search.setBackground(Ui.shape(this, Ui.CARD, Ui.LINE, 1, 14));
-        search.setPadding(d(14), d(12), d(14), d(12));
-        col.addView(search);
-
-        final LinearLayout list = new LinearLayout(this);
-        list.setOrientation(LinearLayout.VERTICAL);
-        col.addView(list);
-        renderPhoneList(list, "");
-        search.addTextChangedListener(new TextWatcher() {
-            public void beforeTextChanged(CharSequence s, int a, int b, int c) {
-            }
-
-            public void onTextChanged(CharSequence s, int a, int b, int c) {
-            }
-
-            public void afterTextChanged(Editable e) {
-                renderPhoneList(list, e.toString());
-            }
-        });
-        col.addView(wideButton("Agregar modelo", R.drawable.ic_plus, v -> editDialog(null)),
-                rowLp(d(10)));
-        sv.addView(col);
-        return sv;
-    }
-
-    private void renderPhoneList(LinearLayout list, String query) {
-        list.removeAllViews();
-        String q = query.trim().toLowerCase();
-        Set<String> favs = prefs.favs();
-        TextView lab = Ui.bold(Ui.text(this, "Asistentes", 13, Ui.SUB));
-        lab.setPadding(d(4), d(12), 0, d(2));
-        list.addView(lab);
-        boolean any = false;
-        for (int pass = 0; pass < 2; pass++) {
-            for (Assistant a : prefs.all()) {
-                boolean f = favs.contains(a.id);
-                if ((pass == 0) != f) continue;
-                if (!q.isEmpty() && !a.name.toLowerCase().contains(q)) continue;
-                any = true;
-                list.addView(assistantRow(a, false), rowLp(d(7)));
-            }
-        }
-        if (!any) list.addView(Ui.text(this, "Sin resultados", 14, Ui.SUB));
-    }
-
-    private LinearLayout.LayoutParams rowLp(int top) {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(MATCH, WRAP);
-        lp.setMargins(0, top, 0, 0);
-        return lp;
-    }
-
-    private View wideButton(String label, int icon, View.OnClickListener l) {
-        LinearLayout b = new LinearLayout(this);
-        b.setOrientation(LinearLayout.HORIZONTAL);
-        b.setGravity(Gravity.CENTER);
-        b.setPadding(d(16), d(12), d(16), d(12));
-        b.setBackground(Ui.shape(this, 0xFF121838, Ui.LINE, 1, 16));
-        b.setClickable(true);
-        b.setOnClickListener(l);
-        b.addView(Ui.icon(this, icon, 20, Ui.TEXT));
-        TextView t = Ui.text(this, label, 15, Ui.TEXT);
-        t.setPadding(d(10), 0, 0, 0);
-        b.addView(t);
-        return b;
-    }
-
-    // ------------------------------------------------------------ lista de asistentes
-
-    private View assistantRow(final Assistant a, boolean selected) {
-        LinearLayout r = new LinearLayout(this);
-        r.setOrientation(LinearLayout.HORIZONTAL);
-        r.setGravity(Gravity.CENTER_VERTICAL);
-        r.setPadding(d(10), d(9), d(10), d(9));
-        r.setBackground(selected ? Ui.shape(this, Ui.CARD, Ui.SEL, 2, 18)
-                : Ui.shape(this, Ui.CARD, Ui.LINE, 1, 18));
-        r.addView(Ui.logo(this, a, 42));
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-        col.setPadding(d(12), 0, 0, 0);
-        col.addView(Ui.bold(Ui.text(this, a.name, 16, Ui.TEXT)));
-        col.addView(Ui.text(this, a.vendor, 12, Ui.SUB));
-        r.addView(col, new LinearLayout.LayoutParams(0, WRAP, 1f));
-
-        boolean fav = prefs.favs().contains(a.id);
-        ImageView star = Ui.icon(this, fav ? R.drawable.ic_star_fill : R.drawable.ic_star, 20,
-                fav ? Ui.ACCENT : Ui.OFF);
-        star.setContentDescription("Favorito");
-        star.setPadding(d(4), d(4), d(4), d(4));
-        star.setOnClickListener(v -> {
-            prefs.toggleFav(a.id);
-            refresh();
-        });
-        r.addView(star);
-        View dot = new View(this);
-        dot.setBackground(Ui.circle(Ui.ONLINE));
-        LinearLayout.LayoutParams dp = new LinearLayout.LayoutParams(d(9), d(9));
-        dp.setMargins(d(8), 0, d(2), 0);
-        r.addView(dot, dp);
-
-        r.setClickable(true);
-        r.setOnClickListener(v -> showAssistant(a.id));
-        r.setOnLongClickListener(v -> {
-            if (!a.custom) return false;
-            new AlertDialog.Builder(this)
-                    .setItems(new String[]{"Editar", "Eliminar"}, (dlg, which) -> {
-                        if (which == 0) editDialog(a);
-                        else deleteCustom(a);
-                    }).show();
-            return true;
-        });
-        return r;
-    }
+    // ------------------------------------------------------------ barra lateral y navegación
 
     private void refreshSidebar() {
         sideList.removeAllViews();
@@ -450,76 +473,43 @@ public class MainActivity extends Activity implements WebViewPool.Host {
         for (int pass = 0; pass < 2; pass++) {
             for (Assistant a : prefs.all()) {
                 if ((pass == 0) != favs.contains(a.id)) continue;
-                sideList.addView(assistantRow(a, a.id.equals(current)), rowLp(d(8)));
-            }
-        }
-        List<String> rec = prefs.recents();
-        if (!rec.isEmpty()) {
-            TextView l2 = Ui.bold(Ui.text(this, "Recientes", 14, Ui.SUB));
-            l2.setPadding(d(6), d(20), 0, d(4));
-            sideList.addView(l2);
-            for (final String id : rec) {
-                final Assistant a = prefs.find(id);
-                if (a == null) continue;
-                LinearLayout r = new LinearLayout(this);
-                r.setOrientation(LinearLayout.HORIZONTAL);
-                r.setGravity(Gravity.CENTER_VERTICAL);
-                r.setPadding(d(4), d(6), d(4), d(6));
-                FrameLayout c = new FrameLayout(this);
-                c.setBackground(Ui.circle(0xFF141A3A));
-                ImageView ic = new ImageView(this);
-                ic.setImageResource(R.drawable.ic_chat);
-                ic.setColorFilter(0xFFC4C9F0);
-                c.addView(ic, new FrameLayout.LayoutParams(d(18), d(18), Gravity.CENTER));
-                r.addView(c, new LinearLayout.LayoutParams(d(38), d(38)));
-                TextView t = Ui.text(this, a.name, 15, 0xFFDDE0FA);
-                t.setPadding(d(12), 0, 0, 0);
-                r.addView(t);
-                r.setClickable(true);
-                r.setOnClickListener(v -> showAssistant(id));
-                sideList.addView(r);
+                boolean sel = tab == T_CHAT && a.id.equals(current);
+                sideList.addView(screens.assistantRow(a, sel), Ui.lp(MATCH, WRAP, 0f, 0, d(8), 0, 0));
             }
         }
     }
-
-    // ------------------------------------------------------------ navegación inferior (tablet)
 
     private void refreshNav() {
         navRow.removeAllViews();
-        addTab("Inicio", R.drawable.ic_home, current == null, v -> showHome());
-        addTab("Chats", R.drawable.ic_chat, current != null, v -> {
-            if (current != null) return;
-            String id = prefs.last();
-            if (prefs.find(id) == null) id = Prefs.BUILTIN[0].id;
-            showAssistant(id);
-        });
-        addTab("Ajustes", R.drawable.ic_settings, false, v -> showMenu());
-    }
-
-    private void addTab(String label, int icon, boolean active, View.OnClickListener l) {
-        LinearLayout t = new LinearLayout(this);
-        t.setOrientation(LinearLayout.VERTICAL);
-        t.setGravity(Gravity.CENTER);
-        t.setOnClickListener(l);
-        FrameLayout box = new FrameLayout(this);
-        if (active) box.setBackground(Ui.shape(this, 0xFF6B5CFF, 0, 0, 14));
-        ImageView iv = new ImageView(this);
-        iv.setImageResource(icon);
-        iv.setColorFilter(active ? 0xFFFFFFFF : Ui.SUB);
-        box.addView(iv, new FrameLayout.LayoutParams(d(24), d(24), Gravity.CENTER));
-        t.addView(box, new LinearLayout.LayoutParams(d(56), d(34)));
-        TextView tv = Ui.bold(Ui.text(this, label, 11, active ? Ui.ACCENT_TXT : Ui.SUB));
-        t.addView(tv);
-        navRow.addView(t, new LinearLayout.LayoutParams(0, MATCH, 1f));
+        for (int i = 0; i < TAB_LABELS.length; i++) {
+            final int idx = i;
+            boolean active = tab == i;
+            LinearLayout t = new LinearLayout(this);
+            t.setOrientation(LinearLayout.VERTICAL);
+            t.setGravity(Gravity.CENTER);
+            t.setClickable(true);
+            t.setOnClickListener(v -> setTab(idx));
+            FrameLayout box = new FrameLayout(this);
+            if (active) box.setBackground(Ui.shape(this, 0xFF6B5CFF, 0, 0, 14));
+            ImageView iv = new ImageView(this);
+            iv.setImageResource(TAB_ICONS[i]);
+            iv.setColorFilter(active ? 0xFFFFFFFF : Ui.SUB);
+            box.addView(iv, new FrameLayout.LayoutParams(d(22), d(22), Gravity.CENTER));
+            t.addView(box, new LinearLayout.LayoutParams(d(52), d(32)));
+            TextView tv = Ui.bold(Ui.text(this, TAB_LABELS[i], 10.5f, active ? Ui.ACCENT_TXT : Ui.SUB));
+            tv.setPadding(0, d(2), 0, 0);
+            t.addView(tv);
+            navRow.addView(t, new LinearLayout.LayoutParams(0, MATCH, 1f));
+        }
     }
 
     // ------------------------------------------------------------ dock (rutas + entrada)
 
-    private View buildDock() {
-        LinearLayout dock = new LinearLayout(this);
-        dock.setOrientation(LinearLayout.VERTICAL);
-        dock.setBackgroundColor(Ui.DOCK);
-        dock.setPadding(d(14), d(10), d(14), d(12));
+    private LinearLayout buildDock() {
+        LinearLayout dk = new LinearLayout(this);
+        dk.setOrientation(LinearLayout.VERTICAL);
+        dk.setBackgroundColor(Ui.DOCK);
+        dk.setPadding(d(14), d(10), d(14), d(10));
 
         LinearLayout sr = new LinearLayout(this);
         sr.setGravity(Gravity.CENTER_VERTICAL);
@@ -528,8 +518,9 @@ public class MainActivity extends Activity implements WebViewPool.Host {
         statusText = Ui.text(this, "", 12, 0xFFB6BCE4);
         statusText.setPadding(d(8), 0, 0, 0);
         statusText.setMaxLines(2);
+        statusText.setEllipsize(TextUtils.TruncateAt.END);
         sr.addView(statusText, new LinearLayout.LayoutParams(0, WRAP, 1f));
-        dock.addView(sr);
+        dk.addView(sr);
 
         LinearLayout segs = new LinearLayout(this);
         segs.setOrientation(LinearLayout.HORIZONTAL);
@@ -540,25 +531,26 @@ public class MainActivity extends Activity implements WebViewPool.Host {
             LinearLayout s = new LinearLayout(this);
             s.setOrientation(LinearLayout.VERTICAL);
             s.setGravity(Gravity.CENTER);
-            s.setPadding(0, d(8), 0, d(8));
+            s.setPadding(0, d(7), 0, d(7));
+            s.setClickable(true);
             s.setOnClickListener(v -> onSeg(idx));
             ImageView iv = new ImageView(this);
-            s.addView(iv, new LinearLayout.LayoutParams(d(18), d(18)));
             iv.setImageResource(ROUTE_ICONS[i]);
+            s.addView(iv, new LinearLayout.LayoutParams(d(18), d(18)));
             TextView tv = Ui.bold(Ui.text(this, ROUTE_LABELS[i], 11, Ui.SUB));
-            tv.setPadding(0, d(3), 0, 0);
+            tv.setPadding(0, d(2), 0, 0);
             s.addView(tv);
             segBox[i] = s;
             segIcon[i] = iv;
             segLabel[i] = tv;
             segs.addView(s, new LinearLayout.LayoutParams(0, WRAP, 1f));
         }
-        dock.addView(segs, rowLp(d(10)));
+        dk.addView(segs, Ui.lp(MATCH, WRAP, 0f, 0, d(8), 0, 0));
 
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(d(16), d(5), d(5), d(5));
+        bar.setPadding(d(16), d(4), d(4), d(4));
         bar.setBackground(Ui.shape(this, Ui.INPUT, 0xFF232A5A, 1, 26));
         input = new EditText(this);
         input.setBackground(null);
@@ -570,6 +562,17 @@ public class MainActivity extends Activity implements WebViewPool.Host {
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
                 | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         bar.addView(input, new LinearLayout.LayoutParams(0, WRAP, 1f));
+
+        FrameLayout mic = new FrameLayout(this);
+        mic.setContentDescription("Dictar");
+        mic.setClickable(true);
+        mic.setOnClickListener(v -> startVoice());
+        ImageView mi = new ImageView(this);
+        mi.setImageResource(R.drawable.ic_mic);
+        mi.setColorFilter(0xFFAEB4E0);
+        mic.addView(mi, new FrameLayout.LayoutParams(d(22), d(22), Gravity.CENTER));
+        bar.addView(mic, new LinearLayout.LayoutParams(d(42), d(42)));
+
         FrameLayout send = new FrameLayout(this);
         send.setBackground(Ui.sendGradient());
         send.setContentDescription("Enviar");
@@ -580,8 +583,8 @@ public class MainActivity extends Activity implements WebViewPool.Host {
         si.setColorFilter(0xFFFFFFFF);
         send.addView(si, new FrameLayout.LayoutParams(d(22), d(22), Gravity.CENTER));
         bar.addView(send, new LinearLayout.LayoutParams(d(44), d(44)));
-        dock.addView(bar, rowLp(d(10)));
-        return dock;
+        dk.addView(bar, Ui.lp(MATCH, WRAP, 0f, 0, d(8), 0, 0));
+        return dk;
     }
 
     private void styleSegs() {
@@ -603,31 +606,44 @@ public class MainActivity extends Activity implements WebViewPool.Host {
             return;
         }
         prefs.setRoute(ROUTES[idx]);
-        statusMsg = "Ruta: " + ROUTE_LABELS[idx];
+        setStatus("Ruta: " + ROUTE_LABELS[idx]);
         styleSegs();
-        statusText.setText(statusMsg);
     }
 
     private void setStatus(String s) {
         statusMsg = s;
-        statusText.setText(s);
+        if (statusText != null) statusText.setText(s);
     }
 
     // ------------------------------------------------------------ acciones
 
-    private void showHome() {
-        current = null;
+    void showAssistant(String id) {
+        if (prefs.find(id) == null) return;
+        current = id;
+        tab = T_CHAT;
+        prefs.addRecent(id);
         refresh();
     }
 
-    private void showAssistant(String id) {
-        if (prefs.find(id) == null) {
-            showHome();
-            return;
+    /** Coloca un texto en la barra de entrada y lleva a una pantalla donde se puede enviar. */
+    void useText(String text) {
+        input.setText(text);
+        input.setSelection(input.length());
+        if (tab != T_HOME && tab != T_CHAT) {
+            tab = current != null ? T_CHAT : T_HOME;
+            refresh();
         }
-        current = id;
-        prefs.addRecent(id);
-        refresh();
+        input.requestFocus();
+        toast("Listo: completa tu pregunta y envía");
+    }
+
+    void copy(String text) {
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        cm.setPrimaryClip(ClipData.newPlainText("ForjaChat", text));
+    }
+
+    void toast(String s) {
+        Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
     }
 
     private void toggleSplit() {
@@ -654,7 +670,44 @@ public class MainActivity extends Activity implements WebViewPool.Host {
                 }).show();
     }
 
-    private void editDialog(final Assistant existing) {
+    private void showChatMenu() {
+        final Assistant a = prefs.find(current);
+        if (a == null) return;
+        String[] items = {
+                "Recargar",
+                "Nuevo chat",
+                "Abrir en el navegador",
+                "Copiar enlace",
+                split ? "Cerrar vista dividida" : "Vista dividida"
+        };
+        new AlertDialog.Builder(this).setTitle(a.name).setItems(items, (dlg, which) -> {
+            WebView w = pool.peek(a.id);
+            String url = w != null && w.getUrl() != null ? w.getUrl() : a.url;
+            switch (which) {
+                case 0:
+                    pool.reload(a.id);
+                    break;
+                case 1:
+                    if (w != null) w.loadUrl(a.url);
+                    break;
+                case 2:
+                    try {
+                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                    } catch (Exception e) {
+                        toast("No hay navegador disponible");
+                    }
+                    break;
+                case 3:
+                    copy(url);
+                    toast("Enlace copiado");
+                    break;
+                default:
+                    toggleSplit();
+            }
+        }).show();
+    }
+
+    void editModel(final Assistant existing) {
         int p = d(16);
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -701,16 +754,32 @@ public class MainActivity extends Activity implements WebViewPool.Host {
                 }).show();
     }
 
-    private void deleteCustom(Assistant a) {
-        List<Assistant> cs = prefs.customs();
-        for (int i = cs.size() - 1; i >= 0; i--) if (cs.get(i).id.equals(a.id)) cs.remove(i);
-        prefs.saveCustoms(cs);
-        if (a.id.equals(second)) {
-            split = false;
-            second = null;
-        }
-        if (a.id.equals(current)) current = null;
-        refresh();
+    void deleteModel(final Assistant a) {
+        new AlertDialog.Builder(this)
+                .setMessage("¿Eliminar «" + a.name + "»?")
+                .setNegativeButton("Cancelar", null)
+                .setPositiveButton("Eliminar", (dlg, w) -> {
+                    List<Assistant> cs = prefs.customs();
+                    for (int i = cs.size() - 1; i >= 0; i--) if (cs.get(i).id.equals(a.id)) cs.remove(i);
+                    prefs.saveCustoms(cs);
+                    if (a.id.equals(second)) {
+                        split = false;
+                        second = null;
+                    }
+                    if (a.id.equals(current)) {
+                        current = null;
+                        tab = T_HOME;
+                    }
+                    refresh();
+                }).show();
+    }
+
+    void clearSessions() {
+        CookieManager.getInstance().removeAllCookies(null);
+        CookieManager.getInstance().flush();
+        WebStorage.getInstance().deleteAllData();
+        pool.reloadAll();
+        toast("Sesiones cerradas");
     }
 
     // ------------------------------------------------------------ envío (coordinador)
@@ -721,24 +790,23 @@ public class MainActivity extends Activity implements WebViewPool.Host {
             toast("Escribe tu pregunta");
             return;
         }
-        Coordinator.Decision d = Coordinator.decide(text, prefs.route(), isOnline(),
+        Coordinator.Decision dec = Coordinator.decide(text, prefs.route(), isOnline(),
                 prefs.inject(), prefs.all(), current);
-        if (d.route == 'X') {
-            setStatus(d.reason);
-            toast(d.reason);
+        if (dec.route == 'X') {
+            setStatus(dec.reason);
+            toast(dec.reason);
             return;
         }
-        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        cm.setPrimaryClip(ClipData.newPlainText("ForjaChat", text));
+        copy(text);
 
         List<Assistant> targets = new ArrayList<>();
         if (split && current != null && prefs.find(second) != null) {
             targets.add(prefs.find(current));
             targets.add(prefs.find(second));
         } else {
-            targets.add(d.target);
+            targets.add(dec.target);
         }
-        statusMsg = "";
+        prefs.addHistory(text, targets.get(0).id, String.valueOf(dec.route));
         showAssistant(targets.get(0).id);
 
         StringBuilder names = new StringBuilder();
@@ -746,17 +814,24 @@ public class MainActivity extends Activity implements WebViewPool.Host {
             if (names.length() > 0) names.append(" + ");
             names.append(a.name);
         }
-        if (d.route == 'A') {
-            for (Assistant a : targets) pool.fill(a, text);
-            setStatus("Ruta Web · " + names + " (" + d.reason + ") · texto rellenado, pulsa enviar en el chat");
+        if (dec.route == 'A') {
+            for (final Assistant a : targets) {
+                pool.fill(a, text, r -> {
+                    if (r != null && r.contains("nofield")) {
+                        setStatus("No encontré la caja de " + a.name + ". Tu pregunta está copiada: pégala.");
+                        toast("Pregunta copiada. Pega en el chat");
+                    }
+                });
+            }
+            setStatus("Ruta Web · " + names + " (" + dec.reason + ") · texto rellenado, pulsa enviar en el chat");
         } else {
-            setStatus("Ruta Asistencia · " + names + " (" + d.reason + ") · pregunta copiada");
+            setStatus("Ruta Asistencia · " + names + " (" + dec.reason + ") · pregunta copiada");
             toast("Pregunta copiada. Pega en el chat");
         }
         input.setText("");
     }
 
-    private boolean isOnline() {
+    boolean isOnline() {
         ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
         Network n = cm.getActiveNetwork();
         if (n == null) return false;
@@ -764,61 +839,33 @@ public class MainActivity extends Activity implements WebViewPool.Host {
         return c != null && c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
     }
 
-    // ------------------------------------------------------------ menú
+    // ------------------------------------------------------------ voz, copia de seguridad, permisos
 
-    private void showMenu() {
-        String[] items = {
-                "Recargar todos los asistentes",
-                "Cerrar todas las sesiones",
-                "Exportar modelos (JSON)",
-                "Importar modelos (JSON)",
-                "Rellenado automático (ruta Web): " + (prefs.inject() ? "activado" : "desactivado"),
-                "Acerca de"
-        };
-        new AlertDialog.Builder(this).setItems(items, (dlg, which) -> {
-            switch (which) {
-                case 0:
-                    pool.reloadAll();
-                    toast("Asistentes recargados");
-                    break;
-                case 1:
-                    CookieManager.getInstance().removeAllCookies(null);
-                    CookieManager.getInstance().flush();
-                    WebStorage.getInstance().deleteAllData();
-                    pool.reloadAll();
-                    toast("Sesiones borradas");
-                    break;
-                case 2:
-                    Intent e = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-                    e.addCategory(Intent.CATEGORY_OPENABLE);
-                    e.setType("application/json");
-                    e.putExtra(Intent.EXTRA_TITLE, "forjachat-modelos.json");
-                    startActivityForResult(e, RQ_EXPORT);
-                    break;
-                case 3:
-                    Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-                    i.addCategory(Intent.CATEGORY_OPENABLE);
-                    i.setType("*/*");
-                    startActivityForResult(i, RQ_IMPORT);
-                    break;
-                case 4:
-                    prefs.setInject(!prefs.inject());
-                    toast("Rellenado automático " + (prefs.inject() ? "activado" : "desactivado"));
-                    break;
-                default:
-                    new AlertDialog.Builder(this)
-                            .setTitle("ForjaChat 1.5")
-                            .setMessage("Reúne varias IA en un solo lugar. Cada asistente guarda su "
-                                    + "historial en su propia web; ForjaChat no envía tus chats a "
-                                    + "ningún servidor propio.\n\nRuta Web: rellena el chat (tú "
-                                    + "pulsas enviar).\nRuta Asistencia: copia tu pregunta para "
-                                    + "pegarla.\nRuta Local: próximamente.")
-                            .setPositiveButton("OK", null).show();
-            }
-        }).show();
+    private void startVoice() {
+        Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        i.putExtra(RecognizerIntent.EXTRA_PROMPT, "Habla ahora");
+        try {
+            startActivityForResult(i, RQ_VOICE);
+        } catch (Exception e) {
+            toast("El dictado por voz no está disponible");
+        }
     }
 
-    // ------------------------------------------------------------ resultados y permisos
+    void exportData() {
+        Intent e = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        e.addCategory(Intent.CATEGORY_OPENABLE);
+        e.setType("application/json");
+        e.putExtra(Intent.EXTRA_TITLE, "forjachat-copia.json");
+        startActivityForResult(e, RQ_EXPORT);
+    }
+
+    void importData() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        startActivityForResult(i, RQ_IMPORT);
+    }
 
     @Override
     protected void onActivityResult(int req, int res, Intent data) {
@@ -830,36 +877,33 @@ public class MainActivity extends Activity implements WebViewPool.Host {
             }
             return;
         }
-        if (res != RESULT_OK || data == null || data.getData() == null) return;
+        if (res != RESULT_OK || data == null) return;
+        if (req == RQ_VOICE) {
+            ArrayList<String> r = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
+            if (r != null && !r.isEmpty()) {
+                String cur = input.getText().toString();
+                input.setText(cur.isEmpty() ? r.get(0) : cur + " " + r.get(0));
+                input.setSelection(input.length());
+            }
+            return;
+        }
+        if (data.getData() == null) return;
         Uri uri = data.getData();
         try {
             if (req == RQ_EXPORT) {
                 OutputStream os = getContentResolver().openOutputStream(uri);
-                os.write(Prefs.customsJson(prefs.customs()).getBytes(StandardCharsets.UTF_8));
+                os.write(prefs.exportAll().getBytes(StandardCharsets.UTF_8));
                 os.close();
-                toast("Modelos exportados");
+                toast("Copia exportada");
             } else if (req == RQ_IMPORT) {
                 InputStream is = getContentResolver().openInputStream(uri);
                 BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
                 StringBuilder sb = new StringBuilder();
                 String line;
-                while ((line = br.readLine()) != null) sb.append(line);
+                while ((line = br.readLine()) != null) sb.append(line).append('\n');
                 br.close();
-                JSONArray arr = new JSONArray(sb.toString());
-                List<Assistant> cs = prefs.customs();
-                int added = 0;
-                for (int k = 0; k < arr.length(); k++) {
-                    JSONObject o = arr.getJSONObject(k);
-                    String n = o.getString("name"), u = o.getString("url");
-                    if (!u.startsWith("https://")) continue;
-                    boolean dup = false;
-                    for (Assistant a : cs) if (a.url.equals(u)) dup = true;
-                    if (dup) continue;
-                    cs.add(new Assistant("c_" + System.currentTimeMillis() + "_" + k, n, u));
-                    added++;
-                }
-                prefs.saveCustoms(cs);
-                toast("Importados: " + added);
+                int added = prefs.importAll(sb.toString());
+                toast("Elementos importados: " + added);
                 refresh();
             }
         } catch (Exception e) {
@@ -887,9 +931,5 @@ public class MainActivity extends Activity implements WebViewPool.Host {
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED)
             need.add(Manifest.permission.CAMERA);
         if (!need.isEmpty()) requestPermissions(need.toArray(new String[0]), RQ_PERM);
-    }
-
-    private void toast(String s) {
-        Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
     }
 }
